@@ -105,6 +105,14 @@ class LocalProvider(
         self._on_duplicate = on_duplicate
         # Unified component storage - keyed by prefixed key (e.g., "tool:name", "resource:uri")
         self._components: dict[str, FastMCPComponent] = {}
+        # The same components grouped by identity (type, name/uri), so lookups
+        # and version checks don't scan every registered component.
+        self._components_by_identity: dict[
+            tuple[type, str], dict[str, FastMCPComponent]
+        ] = {}
+        # Templates match by pattern rather than by name, so reads walk them
+        # all; keep them apart so a read doesn't also walk every tool.
+        self._templates: dict[str, ResourceTemplate] = {}
 
     # =========================================================================
     # Storage methods
@@ -145,18 +153,12 @@ class LocalProvider(
         Raises:
             ValueError: If adding would mix versioned and unversioned components.
         """
-        comp_type, logical_name = self._get_component_identity(component)
+        identity = self._get_component_identity(component)
+        comp_type, logical_name = identity
         is_versioned = component.version is not None
 
         # Check all existing components of the same type and logical name
-        for existing in self._components.values():
-            if not isinstance(existing, comp_type):
-                continue
-
-            _, existing_name = self._get_component_identity(existing)
-            if existing_name != logical_name:
-                continue
-
+        for existing in self._components_by_identity.get(identity, {}).values():
             existing_versioned = existing.version is not None
             if is_versioned != existing_versioned:
                 type_name = comp_type.__name__.lower()
@@ -198,6 +200,10 @@ class LocalProvider(
         self._check_version_mixing(component)
 
         self._components[component.key] = component
+        identity = self._get_component_identity(component)
+        self._components_by_identity.setdefault(identity, {})[component.key] = component
+        if isinstance(component, ResourceTemplate):
+            self._templates[component.key] = component
         return component
 
     def _remove_component(self, key: str) -> None:
@@ -214,6 +220,18 @@ class LocalProvider(
             raise KeyError(f"Component {key!r} not found")
 
         del self._components[key]
+        identity = self._get_component_identity(component)
+        same_identity = self._components_by_identity[identity]
+        del same_identity[key]
+        if not same_identity:
+            del self._components_by_identity[identity]
+        self._templates.pop(key, None)
+
+    def _clear_components(self) -> None:
+        """Remove all components from unified storage."""
+        self._components.clear()
+        self._components_by_identity.clear()
+        self._templates.clear()
 
     def _get_component(self, key: str) -> FastMCPComponent | None:
         """Get a component by its prefixed key.
@@ -357,11 +375,8 @@ class LocalProvider(
             name: The tool name.
             version: Optional version filter. If None, returns highest version.
         """
-        matching = [
-            v
-            for v in self._components.values()
-            if isinstance(v, Tool) and v.name == name
-        ]
+        same_identity = self._components_by_identity.get((Tool, name), {})
+        matching = [v for v in same_identity.values() if isinstance(v, Tool)]
         if version:
             matching = [t for t in matching if version.matches(t.version)]
         if not matching:
@@ -381,11 +396,8 @@ class LocalProvider(
             uri: The resource URI.
             version: Optional version filter. If None, returns highest version.
         """
-        matching = [
-            v
-            for v in self._components.values()
-            if isinstance(v, Resource) and str(v.uri) == uri
-        ]
+        same_identity = self._components_by_identity.get((Resource, uri), {})
+        matching = [v for v in same_identity.values() if isinstance(v, Resource)]
         if version:
             matching = [r for r in matching if version.matches(r.version)]
         if not matching:
@@ -394,7 +406,7 @@ class LocalProvider(
 
     async def _list_resource_templates(self) -> Sequence[ResourceTemplate]:
         """Return all resource templates."""
-        return [v for v in self._components.values() if isinstance(v, ResourceTemplate)]
+        return list(self._templates.values())
 
     async def _get_resource_template(
         self, uri: str, version: VersionSpec | None = None
@@ -407,10 +419,9 @@ class LocalProvider(
         """
         # Find all templates that match the URI
         matching = [
-            component
-            for component in self._components.values()
-            if isinstance(component, ResourceTemplate)
-            and component.matches(uri) is not None
+            template
+            for template in self._templates.values()
+            if template.matches(uri) is not None
         ]
         if version:
             matching = [t for t in matching if version.matches(t.version)]
@@ -431,11 +442,8 @@ class LocalProvider(
             name: The prompt name.
             version: Optional version filter. If None, returns highest version.
         """
-        matching = [
-            v
-            for v in self._components.values()
-            if isinstance(v, Prompt) and v.name == name
-        ]
+        same_identity = self._components_by_identity.get((Prompt, name), {})
+        matching = [v for v in same_identity.values() if isinstance(v, Prompt)]
         if version:
             matching = [p for p in matching if version.matches(p.version)]
         if not matching:

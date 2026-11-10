@@ -110,7 +110,7 @@ class FileSystemProvider(LocalProvider):
     def _load_components(self) -> None:
         """Discover and register all components from the filesystem."""
         if self._loaded:
-            self._components.clear()
+            self._clear_components()
 
         if not self._root.exists():
             logger.warning("FileSystemProvider root does not exist: %s", self._root)

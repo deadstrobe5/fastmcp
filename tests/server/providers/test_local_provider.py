@@ -195,6 +195,47 @@ class TestLocalProviderInterface:
         result = await provider.get_tool("nonexistent")
         assert result is None
 
+    async def test_get_tool_after_remove_and_replace(self):
+        """Lookups follow removals and replacements of same-named components."""
+        provider = LocalProvider(on_duplicate="replace")
+        params = {"type": "object"}
+        provider.add_tool(Tool(name="tool", version="1", parameters=params))
+        provider.add_tool(Tool(name="tool", version="2", parameters=params))
+        provider.add_prompt(Prompt(name="tool"))
+        provider.remove_tool("tool", version="2")
+        result = await provider.get_tool("tool")
+        assert result is not None and result.version == "1"
+
+        provider.remove_tool("tool")
+        assert await provider.get_tool("tool") is None
+        assert await provider.get_prompt("tool") is not None
+
+        provider.add_tool(Tool(name="tool", parameters=params))
+        replacement = Tool(name="tool", description="new", parameters=params)
+        provider.add_tool(replacement)
+        assert await provider.get_tool("tool") is replacement
+
+    async def test_get_resource_template_after_remove(self):
+        """Template reads follow removals, and the first match in order wins."""
+        provider = LocalProvider()
+
+        def read(id: str, kind: str = "") -> str:
+            return id
+
+        provider.resource("data://{kind}/{id}")(read)
+        provider.resource("data://users/{id}")(read)
+        result = await provider.get_resource_template("data://users/1")
+        assert result is not None
+        assert result.uri_template == "data://{kind}/{id}"
+
+        provider.remove_template("data://{kind}/{id}")
+        result = await provider.get_resource_template("data://users/1")
+        assert result is not None
+        assert result.uri_template == "data://users/{id}"
+        assert await provider.get_resource_template("data://posts/1") is None
+        templates = await provider.list_resource_templates()
+        assert [t.uri_template for t in templates] == ["data://users/{id}"]
+
     async def test_list_resources(self):
         """Test listing resources."""
         provider = LocalProvider()
